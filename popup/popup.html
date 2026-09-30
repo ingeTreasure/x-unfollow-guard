@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>X 未回关卫士</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <img src="../icons/icon32.png" alt="" class="logo" />
+      <div class="title">
+        <h1>未回关卫士</h1>
+        <p class="subtitle">数据只存在本地，不上传任何服务器</p>
+      </div>
+    </header>
+
+    <section id="notLoggedIn" class="hint hidden">
+      请在 X（x.com）标签页打开本插件
+    </section>
+
+    <section id="mainPanel" class="hidden">
+      <div class="card overview-card">
+        <div class="card-row">
+          <span class="label">当前账号</span>
+          <span class="value" id="meHandle">—</span>
+        </div>
+        <div class="card-row">
+          <span class="label">今日已取关</span>
+          <span class="value" id="todayUnfollow">— / 200 人</span>
+        </div>
+      </div>
+
+      <div class="status" id="statusLine" aria-live="polite">就绪</div>
+
+      <div class="divider"></div>
+
+      <div class="toggle-row">
+        <div class="toggle-label">
+          <span>在「正在关注」页高亮未回关</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggleHighlight" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div id="followingStats" class="hint small hidden">
+        本页共 <b id="checkedCount">0</b> 人，<b id="markedCount" class="danger">0</b> 人未回关
+      </div>
+
+      <div class="divider"></div>
+
+      <section class="follow-tools" aria-labelledby="followToolsTitle">
+      <div class="section-title" id="followToolsTitle">⚠ 自动取关未回关</div>
+      <div class="hint small review-hint" id="unfollowHint">
+        仅在自己的「正在关注」页处理已标记账号。开始前会再次确认；随后自动处理 X 的逐账号确认弹窗，可随时停止。请谨慎使用。
+      </div>
+      <div class="unfollow-row">
+        <label for="unfollowSkipFront">跳过前 N 位</label>
+        <input type="number" id="unfollowSkipFront" min="0" max="1000" value="0" aria-label="跳过列表前多少位" />
+        <label for="unfollowLimit">本次上限</label>
+        <input type="number" id="unfollowLimit" min="1" max="200" value="20" aria-label="本次最多取关人数" />
+      </div>
+      <div class="actions">
+        <button id="btnAutoUnfollow" class="btn btn-danger">开始自动取关</button>
+        <button id="btnStopUnfollow" class="btn btn-secondary hidden">停止取关</button>
+      </div>
+      <div class="status" id="unfollowStatusLine" aria-live="polite"></div>
+      </section>
+
+      <div class="divider"></div>
+
+      <div class="section-title">🚀 同步到 Binance Square</div>
+      <div class="hint small">
+        一键同步支持正文、最多 4 张图片和可读取的直链视频；最多关联 3 个现货币种，普通话题标签保留，@提及不会转换。纯图片推文不支持。OpenAPI Key 只供一键同步使用并保存在本地。
+      </div>
+      <details class="earn-guide">
+        <summary>让同步更有机会产生收益</summary>
+        <ul>
+          <li>币安要求账号满足地区和身份认证资格；符合条件的账号发布首帖后自动参与。</li>
+          <li>每帖最多关联 3 个币种。读者需要点击币种标记或交易组件，并在随后 1 分钟内完成符合条件的交易，才可能归因。</li>
+          <li>自成交、API/复制交易及免手续费交易等不在适用归因范围，具体以币安规则页为准。</li>
+          <li>同步后的 <code>$BTC</code> 是可点击的币种引用；它和单独的 K 线图表组件、交易分享卡不是一回事。当前发帖请求没有这两类组件字段。</li>
+          <li>交易分享卡需要从你自己的真实交易中选择，不能从 X 帖子推断或伪造。若要附加图表或真实交易卡，请用 Square 原生创作器发布这类帖子；发帖本身不保证收益。</li>
+        </ul>
+        <a href="https://www.binance.com/en-BH/support/faq/detail/3f4940d27ff04748a13e0fc1d3f1598d" target="_blank" rel="noreferrer">查看币安 Write to Earn 规则 ↗</a>
+        <a href="https://www.binance.com/en/square/post/23876712519849" target="_blank" rel="noreferrer">查看官方 Trade Sharing 操作说明 ↗</a>
+      </details>
+      <div class="settings-row">
+        <input type="password" id="binanceApiKey" placeholder="粘贴 Binance OpenAPI Key" />
+        <button id="btnSaveKey" class="btn btn-ghost btn-sm">保存</button>
+      </div>
+      <div class="status" id="syncStatusLine" aria-live="polite"></div>
+    </section>
+
+    <footer class="footer">打开自己的「正在关注」列表，即可查看未回关标记</footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
