@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X 未回关卫士",
-  "version": "1.4.3",
+  "version": "2.0.1",
   "description": "在 X 正在关注列表中自动高亮未回关账号，支持限量取关和同步推文到 Binance Square。数据只存本地。",
   "icons": {
     "16": "icons/icon16.png",
@@ -18,7 +18,10 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["storage", "tabs"],
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
@@ -32,9 +35,17 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["content/content.js"],
-      "css": ["content/content.css"],
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content/pacing.js",
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
       "run_at": "document_idle"
     }
   ]

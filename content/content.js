@@ -15,29 +15,25 @@
   const HANDLE_RE = /^\/([A-Za-z0-9_]{1,15})\/?$/;
   const USER_LIST_PATH_RE = /^\/([A-Za-z0-9_]{1,15})\/(followers|following)\/?$/;
   const HIGHLIGHT_STORAGE_KEY = 'xnfb.highlightEnabled';
+  const PROTECTED_STORAGE_KEY = 'xnfb.protectedHandles';
+  let protectedHandles = new Set();
+  let startingUnfollow = false;
+  let unfollowGeneration = 0;
+  let unfollowBusy = false;
+  let runToken = null;
   const UNFOLLOW_BTN_SELECTOR = 'button, [role="button"]';
   const CONFIRM_BTN_SELECTOR = '[data-testid="confirmationSheetConfirm"]';
-  const UNFOLLOW_INTERVAL_MIN_MS = 3800;
-  const UNFOLLOW_INTERVAL_MAX_MS = 7500;
   const UNFOLLOW_LIMIT_MAX = 200;
   const UNFOLLOW_DAILY_CAP = 200;
   const UNFOLLOW_DAILY_KEY = 'xnfb.unfollowDaily';
   const UNFOLLOW_SKIP_FRONT_DEFAULT = 0;
   const UNFOLLOW_SKIP_FRONT_MAX = 1000;
-  const UNFOLLOW_BREAK_EVERY_MIN = 6;
-  const UNFOLLOW_BREAK_EVERY_MAX = 10;
-  const UNFOLLOW_BREAK_MS_MIN = 25000;
-  const UNFOLLOW_BREAK_MS_MAX = 45000;
   const UNFOLLOW_NO_PROGRESS_LIMIT = 10;
   const UNFOLLOW_BUTTON_RETRY_MAX = 2;
   // X 的关注列表是虚拟列表，取关仅作用于当前显示并已校验身份的账号。
   const CONFIRM_DIALOG_TIMEOUT_MS = 3000;
   const CONFIRM_CLOSE_TIMEOUT_MS = 4000;
-  // 原有的自然停顿分布：大多数操作节奏较短，偶尔插入较长间隔。
-  const DISTRACTION_CHANCE = 0.12;
-  const DISTRACTION_MS_MIN = 8000;
-  const DISTRACTION_MS_MAX = 25000;
-  const SCROLL_BACK_CHANCE = 0.12;
+  let pacing = globalThis.XnfbPacing.create();
   const SYNC_BADGE_CLASS = 'xnfb-sync-badge';
   const SYNC_BADGE_FLAG = 'xnfbSyncBadge';
   const syncBadgeResetTimers = new WeakMap();
@@ -48,16 +44,6 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-  function randomBetween(min, max) {
-    return min + Math.random() * (max - min);
-  }
-  function humanDelay(min, max) {
-    const base = min + (max - min) * Math.pow(Math.random(), 1.6);
-    if (Math.random() < DISTRACTION_CHANCE) {
-      return base + randomBetween(DISTRACTION_MS_MIN, DISTRACTION_MS_MAX);
-    }
-    return base;
   }
   function listScrollRoot() {
     const cell = followingUserCells()[0];
@@ -81,11 +67,9 @@
 
   function humanScroll(allowBackward) {
     const metrics = listScrollMetrics();
-    const lookBack = allowBackward && metrics.top > 0 && Math.random() < SCROLL_BACK_CHANCE;
-    const distance = metrics.viewport * (lookBack ? randomBetween(0.1, 0.2) : randomBetween(0.24, 0.52));
-    const top = lookBack ? -distance : distance;
-    if (metrics.isDocument) window.scrollBy({ top, behavior: 'smooth' });
-    else metrics.root.scrollBy({ top, behavior: 'smooth' });
+    const plan = pacing.scrollPlan({ top: metrics.top, viewport: metrics.viewport, allowBackward });
+    if (metrics.isDocument) window.scrollBy(plan);
+    else metrics.root.scrollBy(plan);
     return metrics;
   }
 
@@ -200,7 +184,13 @@
   }
 
   function targetNoLongerFollowed(target) {
-    return !target?.cell?.isConnected || handleOf(target.cell) !== target.handle || !unfollowButtonOf(target.cell);
+    // A virtualized row disappearing or being reused is not proof of an unfollow.
+    if (!target?.cell?.isConnected || handleOf(target.cell) !== target.handle) return false;
+    return !unfollowButtonOf(target.cell) && Array.from(target.cell.querySelectorAll(UNFOLLOW_BTN_SELECTOR)).some((button) => {
+      const testId = button.getAttribute('data-testid') || '';
+      const label = (button.innerText || button.getAttribute('aria-label') || '').trim();
+      return /(?:^|[-_])follow$/i.test(testId) || /^(follow|关注|關注)$/i.test(label);
+    });
   }
 
   async function waitForTargetUpdate(target, timeoutMs) {
@@ -292,7 +282,7 @@
     await storageSet({ [HIGHLIGHT_STORAGE_KEY]: enabled });
     if (isMyListPage('following')) {
       if (enabled) await applyHighlights();
-      else clearHighlights();
+      else await applyHighlights();
     }
   }
 
@@ -309,10 +299,6 @@
       return;
     }
     const enabled = await isHighlightEnabled();
-    if (!enabled) {
-      clearHighlights();
-      return;
-    }
     const me = myHandle();
     if (!me) return;
 
@@ -338,6 +324,7 @@
         return;
       }
       marked += 1;
+      if (!enabled) { clearCellHighlight(cell); return; }
       cell.classList.add('xnfb-marked');
       if (!badge) {
         badge = document.createElement('span');
@@ -372,10 +359,7 @@
     limit: 20,
     skipFront: UNFOLLOW_SKIP_FRONT_DEFAULT,
     noProgressRounds: 0,
-    sinceBreak: 0,
-    sinceScroll: 0,
-    nextScrollAfter: 3,
-    nextBreakAt: UNFOLLOW_BREAK_EVERY_MIN,
+    furthestScrollTop: 0,
     missingBtn: 0,
   };
 
@@ -387,15 +371,45 @@
     const data = await storageGet([UNFOLLOW_DAILY_KEY]);
     const rec = data[UNFOLLOW_DAILY_KEY];
     if (!rec || rec.day !== todayKey()) return 0;
-    return rec.count || 0;
+    return Math.max(0, Number(rec.count) || 0);
   }
   async function bumpDailyUnfollow() {
     const done = (await readDailyUnfollow()) + 1;
-    await storageSet({ [UNFOLLOW_DAILY_KEY]: { day: todayKey(), count: done } });
+    if (!await storageSet({ [UNFOLLOW_DAILY_KEY]: { day: todayKey(), count: done } })) throw new Error('每日计数保存失败，已停止取关');
     return done;
   }
 
+  function workerMessage(message) {
+    return new Promise((resolve) => chrome.runtime.sendMessage(message, (response) => resolve(chrome.runtime.lastError ? null : response)));
+  }
+  async function releaseRun() {
+    const token = runToken;
+    runToken = null;
+    if (token) await workerMessage({ type: 'xnfb:releaseUnfollow', token });
+  }
+  async function renewRun() {
+    const response = await workerMessage({ type: 'xnfb:renewUnfollow', token: runToken });
+    if (response?.ok) return true;
+    await stopAutoUnfollow();
+    notifyStatus('取关任务锁已失效，已停止；请重新开始');
+    return false;
+  }
+  async function loadProtectedHandles() {
+    // Read failures must prevent destructive actions, rather than silently drop protection.
+    const data = await new Promise((resolve, reject) => chrome.storage.local.get([PROTECTED_STORAGE_KEY], (result) => {
+      if (chrome.runtime.lastError) reject(new Error('保护名单读取失败，未执行取关'));
+      else resolve(result);
+    }));
+    protectedHandles = new Set(Array.isArray(data[PROTECTED_STORAGE_KEY]) ? data[PROTECTED_STORAGE_KEY].map((handle) => String(handle).toLowerCase()) : []);
+  }
   async function startAutoUnfollow(limit, skipFront) {
+    if (startingUnfollow || unfollowBusy || unfollowState.running) return { ok: false, error: 'already_running' };
+    startingUnfollow = true;
+    try { return await beginAutoUnfollow(limit, skipFront, unfollowGeneration); }
+    finally { startingUnfollow = false; if (!unfollowState.running) await releaseRun(); }
+  }
+  async function beginAutoUnfollow(limit, skipFront, generation) {
+    await loadProtectedHandles();
     if (!isMyListPage('following')) {
       notifyStatus('请先打开自己的「正在关注」页面再开始自动取关');
       return { ok: false, error: 'wrong_page' };
@@ -415,7 +429,11 @@
       notifyStatus(`今天已取关 ${alreadyToday} 人，达到安全上限，请明天再操作`);
       return { ok: false, error: 'daily_cap' };
     }
-    const allowed = Math.min(Number(limit) || 20, UNFOLLOW_DAILY_CAP - alreadyToday);
+    const lock = await workerMessage({ type: 'xnfb:acquireUnfollow' });
+    if (!lock?.ok) return { ok: false, error: 'already_running', message: lock?.error || '无法获得任务锁，请稍后重试' };
+    runToken = lock.token;
+    if (generation !== unfollowGeneration) return { ok: false, error: 'cancelled', message: '任务已取消' };
+    const allowed = Math.min(Math.floor(Number(limit)) || 20, UNFOLLOW_DAILY_CAP - alreadyToday);
     if (unfollowTimer) clearTimeout(unfollowTimer);
     unfollowState.running = true;
     unfollowState.me = me;
@@ -431,17 +449,15 @@
       ? Math.max(0, Math.min(UNFOLLOW_SKIP_FRONT_MAX, Math.floor(skipNum)))
       : UNFOLLOW_SKIP_FRONT_DEFAULT;
     unfollowState.noProgressRounds = 0;
-    unfollowState.sinceBreak = 0;
-    unfollowState.sinceScroll = 0;
-    unfollowState.nextScrollAfter = Math.round(randomBetween(2, 4));
+    unfollowState.furthestScrollTop = 0;
+    pacing = globalThis.XnfbPacing.create();
     unfollowState.missingBtn = 0;
-    unfollowState.nextBreakAt = Math.round(randomBetween(UNFOLLOW_BREAK_EVERY_MIN, UNFOLLOW_BREAK_EVERY_MAX));
     notifyStatus(
       `自动取关中…0/${unfollowState.limit}（前 ${unfollowState.skipFront} 位暂不处理，今日安全上限剩 ${UNFOLLOW_DAILY_CAP - alreadyToday}）`
     );
     // 跳过 N 位需要稳定的列表起点，开始前先回到当前关注列表顶部，不离开此页面。
     await scrollListToStart();
-    scheduleUnfollowTick(0);
+    if (unfollowState.running) scheduleUnfollowTick(pacing.delay('start'));
     return { ok: true };
   }
 
@@ -449,32 +465,44 @@
     if (unfollowTimer) clearTimeout(unfollowTimer);
     unfollowTimer = setTimeout(() => {
       unfollowTimer = null;
+      unfollowBusy = true;
       unfollowTick().catch(async (error) => {
         console.error('[未回关卫士] 自动取关异常并停止：', error);
         await stopAutoUnfollow();
         notifyStatus(`自动取关遇到错误并已停止：${error?.message || '未知错误'}`);
+      }).finally(async () => {
+        unfollowBusy = false;
+        if (!unfollowState.running) await releaseRun();
       });
     }, delayMs);
   }
 
   async function stopAutoUnfollow() {
+    unfollowGeneration += 1;
     const wasRunning = unfollowState.running;
     unfollowState.running = false;
     if (unfollowTimer) {
       clearTimeout(unfollowTimer);
       unfollowTimer = null;
     }
+    if (!unfollowBusy && !startingUnfollow) await releaseRun();
     if (wasRunning) notifyStatus(`已停止自动取关，本次共取关 ${unfollowState.count} 人`);
   }
 
   function isSameNonFollowerTarget(target) {
     return !!target?.cell?.isConnected &&
       handleOf(target.cell) === target.handle &&
-      !followsMe(target.cell);
+      !followsMe(target.cell) &&
+      !protectedHandles.has(target.handle) && target.handle !== unfollowState.me;
   }
 
   async function unfollowTick() {
     if (!unfollowState.running) return;
+    if (!await renewRun()) return;
+    await loadProtectedHandles();
+    if (await readDailyUnfollow() >= UNFOLLOW_DAILY_CAP) {
+      await stopAutoUnfollow(); notifyStatus('今日已达到 200 人上限，自动取关已停止'); return;
+    }
 
     if (!isCurrentAutoUnfollowPage()) {
       await stopAutoUnfollow();
@@ -505,7 +533,7 @@
       if (h && !unfollowState.seen.has(h)) {
         unfollowState.seen.set(h, unfollowState.seenCount++);
       }
-      if (h && unfollowState.seen.get(h) < unfollowState.skipFront) unfollowState.skipped.add(h);
+      if (h && (unfollowState.seen.get(h) < unfollowState.skipFront || protectedHandles.has(h))) unfollowState.skipped.add(h);
       if (h && h !== unfollowState.me && !followsMe(cell)) unfollowState.nonFollowers.add(h);
     });
     const newlySeen = unfollowState.seenCount - seenBefore;
@@ -514,7 +542,7 @@
     let target = null;
     for (const cell of cells) {
       const h = handleOf(cell);
-      if (!h || !unfollowState.seen.has(h) || !cellIsInViewport(cell) || followsMe(cell) || unfollowState.processed.has(h)) continue;
+      if (!h || h === unfollowState.me || protectedHandles.has(h) || !unfollowState.seen.has(h) || !cellIsInViewport(cell) || followsMe(cell) || unfollowState.processed.has(h)) continue;
       const pos = unfollowState.seen.get(h);
       if (pos != null && pos < unfollowState.skipFront) continue; // 保护期内，先不处理
       target = { cell, handle: h };
@@ -523,8 +551,8 @@
 
     if (!target) {
       const before = listScrollMetrics();
-      humanScroll(true);
-      await sleep(450);
+      humanScroll(newlySeen > 0 && unfollowState.noProgressRounds === 0);
+      await sleep(pacing.delay('settle'));
       let after = listScrollMetrics();
       let scrollMoved = Math.abs(after.top - before.top) > 8;
       if (!scrollMoved) {
@@ -532,12 +560,14 @@
         const lastCell = currentCells[currentCells.length - 1];
         if (lastCell) {
           lastCell.scrollIntoView({ block: 'end', behavior: 'smooth' });
-          await sleep(450);
+          await sleep(pacing.delay('settle'));
           after = listScrollMetrics();
           scrollMoved = Math.abs(after.top - before.top) > 8;
         }
       }
-      if (newlySeen > 0 || scrollMoved) unfollowState.noProgressRounds = 0;
+      const advanced = after.top > unfollowState.furthestScrollTop + 8;
+      unfollowState.furthestScrollTop = Math.max(unfollowState.furthestScrollTop, after.top);
+      if (newlySeen > 0 || advanced) unfollowState.noProgressRounds = 0;
       else unfollowState.noProgressRounds += 1;
 
       if (unfollowState.noProgressRounds >= UNFOLLOW_NO_PROGRESS_LIMIT) {
@@ -552,7 +582,7 @@
         return;
       }
       notifyStatus(`正在继续检查「正在关注」列表…已看到 ${unfollowState.seenCount} 个账号，识别到 ${unfollowState.nonFollowers.size} 个未回关`);
-      scheduleUnfollowTick(randomBetween(900, 1500));
+      scheduleUnfollowTick(pacing.delay('retry'));
       return;
     }
 
@@ -561,7 +591,7 @@
     if (targetRect.top < 90 || targetRect.bottom > window.innerHeight - 90) {
       target.cell.scrollIntoView({ block: targetRect.top < 90 ? 'start' : 'end', behavior: 'smooth' });
     }
-    await sleep(randomBetween(600, 1300));
+    await sleep(pacing.delay('read'));
 
     if (!unfollowState.running) return;
     if (!isCurrentAutoUnfollowPage()) {
@@ -572,13 +602,13 @@
     // X 会复用虚拟列表里的 DOM 节点；滚动等待期间先核对节点仍属于同一账号。
     if (!isSameNonFollowerTarget(target)) {
       notifyStatus('列表正在更新，重新识别当前账号…');
-      scheduleUnfollowTick(1200);
+      scheduleUnfollowTick(pacing.delay('retry'));
       return;
     }
     let btn = unfollowButtonOf(target.cell);
     for (let attempt = 0; !btn && attempt < UNFOLLOW_BUTTON_RETRY_MAX; attempt += 1) {
       target.cell.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      await sleep(randomBetween(350, 550));
+      await sleep(pacing.delay('hover'));
       if (!unfollowState.running) return;
       btn = unfollowButtonOf(target.cell);
     }
@@ -586,12 +616,16 @@
       unfollowState.missingBtn += 1;
       unfollowState.processed.add(target.handle);
       notifyStatus(`未找到 @${target.handle} 的“正在关注”按钮，继续检查后续账号…`);
-      scheduleUnfollowTick(900);
+      scheduleUnfollowTick(pacing.delay('retry'));
       return;
     }
     btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    await sleep(randomBetween(250, 600));
-    if (!unfollowState.running) return;
+    await sleep(pacing.delay('hover'));
+    await loadProtectedHandles();
+    if (!unfollowState.running || !await renewRun()) return;
+    if (!isCurrentAutoUnfollowPage() || !isSameNonFollowerTarget(target) || unfollowButtonOf(target.cell) !== btn) {
+      scheduleUnfollowTick(pacing.delay('retry')); return;
+    }
     btn.click();
 
     // 确认弹窗可能因为 DOM 变化没弹出来；而弹窗卡住不关时必须停下，
@@ -601,6 +635,11 @@
     if (!confirmBtn) {
       const menuItem = unfollowMenuItem(target.handle);
       if (menuItem) {
+        await loadProtectedHandles();
+        if (!unfollowState.running || !await renewRun()) return;
+        if (!isCurrentAutoUnfollowPage() || !isSameNonFollowerTarget(target)) {
+          await stopAutoUnfollow(); notifyStatus('账号或保护名单已变化，未执行菜单取关；请关闭菜单'); return;
+        }
         menuItem.click();
         confirmBtn = await waitForSelector(CONFIRM_BTN_SELECTOR, CONFIRM_DIALOG_TIMEOUT_MS);
       }
@@ -614,7 +653,7 @@
     }
 
     if (confirmBtn) {
-      await sleep(randomBetween(200, 600));
+      await sleep(pacing.delay('confirm'));
       if (!unfollowState.running) return;
       if (!isCurrentAutoUnfollowPage()) {
         await stopAutoUnfollow();
@@ -625,6 +664,11 @@
         await stopAutoUnfollow();
         notifyStatus('确认弹窗已变化，自动取关已停止；请手动检查页面');
         return;
+      }
+      await loadProtectedHandles();
+      if (!unfollowState.running || !await renewRun()) return;
+      if (!isCurrentAutoUnfollowPage() || !isSameNonFollowerTarget(target) || !confirmBtn.isConnected || document.querySelector(CONFIRM_BTN_SELECTOR) !== confirmBtn) {
+        await stopAutoUnfollow(); notifyStatus('账号已受保护或关注状态变化，未确认取关；请关闭页面弹窗'); return;
       }
       confirmBtn.click();
 
@@ -640,34 +684,27 @@
         return;
       }
     }
-    if (!unfollowState.running) return;
-
+    // If Stop arrives after confirmation, still account for the operation already completed.
     unfollowState.count += 1;
-    unfollowState.sinceBreak += 1;
     await bumpDailyUnfollow();
     unfollowState.processed.add(target.handle);
+    if (!unfollowState.running) { notifyStatus(`已停止，本次共取关 ${unfollowState.count} 人`); return; }
     notifyStatus(`自动取关中…${unfollowState.count}/${unfollowState.limit}（刚取关 @${target.handle}）`);
 
-    unfollowState.sinceScroll += 1;
-    if (unfollowState.sinceScroll >= unfollowState.nextScrollAfter) {
-      unfollowState.sinceScroll = 0;
-      unfollowState.nextScrollAfter = Math.round(randomBetween(2, 4));
-      humanScroll(false);
-      await sleep(randomBetween(450, 900));
-    }
-
-    if (!unfollowState.running) return;
-
-    if (unfollowState.sinceBreak >= unfollowState.nextBreakAt) {
-      unfollowState.sinceBreak = 0;
-      unfollowState.nextBreakAt = Math.round(randomBetween(UNFOLLOW_BREAK_EVERY_MIN, UNFOLLOW_BREAK_EVERY_MAX));
-      const breakMs = randomBetween(UNFOLLOW_BREAK_MS_MIN, UNFOLLOW_BREAK_MS_MAX);
-      notifyStatus(`自动取关中…${unfollowState.count}/${unfollowState.limit}（暂停 ${Math.round(breakMs / 1000)} 秒）`);
-      scheduleUnfollowTick(breakMs);
+    if (unfollowState.count >= unfollowState.limit) {
+      unfollowState.running = false;
+      notifyStatus(`自动取关完成，共取关 ${unfollowState.count} 人`);
       return;
     }
 
-    scheduleUnfollowTick(humanDelay(UNFOLLOW_INTERVAL_MIN_MS, UNFOLLOW_INTERVAL_MAX_MS));
+    const next = pacing.afterAction();
+    if (next.scroll) {
+      humanScroll(true);
+      await sleep(pacing.delay('settle'));
+    }
+    if (!unfollowState.running) return;
+    if (next.rest) notifyStatus(`自动取关中…${unfollowState.count}/${unfollowState.limit}（休息约 ${Math.round(next.waitMs / 1000)} 秒，可随时停止）`);
+    scheduleUnfollowTick(next.waitMs);
   }
 
   // ---------- 提取推文内容（供同步到 Binance Square 使用） ----------
@@ -810,13 +847,15 @@
             badge.dataset.postUrl = resp.postUrl || '';
             const symbols = Array.isArray(resp.symbols) ? resp.symbols : [];
             const skipped = Array.isArray(resp.skippedSymbols) ? resp.skippedSymbols : [];
+            const trimmedHashtags = Array.isArray(resp.trimmedHashtags) ? resp.trimmedHashtags : [];
             const linked = symbols.length ? `；关联 ${symbols.map((symbol) => `$${symbol}`).join(' ')}` : '；无币种标记';
             const capped = skipped.length ? `；超出每帖3个上限，未关联 ${skipped.map((symbol) => `#${symbol}`).join(' ')}` : '';
-            const openHint = resp.postUrl ? '；再点打开已发布帖子' : '；币安未返回帖子链接，勿重复发布';
+            const trimmed = trimmedHashtags.length ? `；按币安返回的标签上限自动省略 ${trimmedHashtags.join(' ')}` : '';
+            const openHint = (resp.postUrl ? '；再点打开已发布帖子' : '；币安未返回帖子链接，勿重复发布') + (resp.recordWarning ? `；${resp.recordWarning}` : '');
             if (resp.alreadyPublished) {
-              setSyncBadgeState(badge, 'done', `✓ 这条 X 内容之前已同步${linked}${openHint}`);
+              setSyncBadgeState(badge, 'done', `✓ 这条 X 内容之前已同步${linked}${trimmed}${openHint}`);
             } else {
-              setSyncBadgeState(badge, 'done', `✓ 已发布${linked}${capped}${openHint}`);
+              setSyncBadgeState(badge, 'done', `✓ 已发布${linked}${capped}${trimmed}${openHint}`);
             }
           } else if (resp?.uncertain) {
             badge.dataset.uncertain = 'true';
@@ -825,7 +864,6 @@
           } else {
             setSyncBadgeState(badge, 'failed', '同步失败');
             badge.title = resp?.error || '未知错误';
-            resetSyncBadgeLater(badge, 3000);
           }
         };
         const sendSyncRequest = () => {
@@ -963,6 +1001,16 @@
     });
     return true; // 异步响应
   });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes[PROTECTED_STORAGE_KEY]) {
+      protectedHandles = new Set((changes[PROTECTED_STORAGE_KEY].newValue || []).map((handle) => String(handle).toLowerCase()));
+    }
+    if (changes[HIGHLIGHT_STORAGE_KEY]) applyHighlights();
+  });
+  // Keep the cross-tab lease alive during variable, interruptible rest periods.
+  setInterval(() => { if (unfollowState.running) renewRun(); }, 30000);
 
   // ---------- 初始化 ----------
 

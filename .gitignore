@@ -1,0 +1,14 @@
+.DS_Store
+*.log
+node_modules/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+/tmp/
+/.publish/
+/docs/design/logo-concept.png
+/releases/*
+!/releases/x-unfollow-guard-v2.0.1.zip
+!/releases/x-unfollow-guard-v2.0.1.zip.sha256

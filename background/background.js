@@ -9,6 +9,60 @@ const V1_BASE = 'https://www.binance.com/bapi/composite/v1/public/pgc/openApi';
 const V2_BASE = 'https://www.binance.com/bapi/composite/v2/public/pgc/openApi';
 const API_KEY_STORAGE_KEY = 'xnfb.binanceApiKey';
 const PUBLISHED_SOURCE_POSTS_KEY = 'xnfb.squarePublishedSourcePosts';
+const PENDING_SOURCE_POSTS_KEY = 'xnfb.squarePendingSourcePosts';
+const UNFOLLOW_LEASE_KEY = 'xnfb.unfollowLease';
+const UNFOLLOW_LEASE_MS = 120000;
+const inFlightSyncs = new Map();
+let storageQueue = Promise.resolve();
+function serializedStorage(operation) {
+  const next = storageQueue.then(operation);
+  storageQueue = next.catch(() => {});
+  return next;
+}
+function localGet(keys) {
+  return new Promise((resolve, reject) => chrome.storage.local.get(keys, (data) => {
+    const error = chrome.runtime.lastError;
+    error ? reject(new Error('本地存储读取失败')) : resolve(data || {});
+  }));
+}
+function localSet(data) {
+  return new Promise((resolve, reject) => chrome.storage.local.set(data, () => {
+    const error = chrome.runtime.lastError;
+    error ? reject(new Error('本地记录保存失败，未继续发布')) : resolve(true);
+  }));
+}
+function updatePendingPost(sourceId, value) {
+  return serializedStorage(async () => {
+    const data = await localGet([PENDING_SOURCE_POSTS_KEY]);
+    const entries = { ...(data[PENDING_SOURCE_POSTS_KEY] || {}) };
+    if (value) entries[sourceId] = value;
+    else delete entries[sourceId];
+    // Never evict unresolved entries; fail closed if local protection is full.
+    if (Object.keys(entries).length > 500) throw new Error('待核实记录已满，请先在同步记录中核实发布结果');
+    await localSet({ [PENDING_SOURCE_POSTS_KEY]: entries });
+  });
+}
+function manageUnfollowLease(type, sender, token) {
+  return serializedStorage(async () => {
+    if (!sender.tab?.id || !/^https:\/\/(x\.com|twitter\.com)\//.test(sender.tab.url || '')) return { ok: false, error: '无效页面' };
+    const data = await localGet([UNFOLLOW_LEASE_KEY]);
+    const lease = data[UNFOLLOW_LEASE_KEY];
+    const owns = lease?.tabId === sender.tab.id && lease?.token === token;
+    if (type === 'xnfb:acquireUnfollow') {
+      if (lease && lease.expiresAt > Date.now()) return { ok: false, error: '已有取关任务在运行，请先停止或等待旧任务结束' };
+      const next = { tabId: sender.tab.id, token: crypto.randomUUID(), expiresAt: Date.now() + UNFOLLOW_LEASE_MS };
+      await localSet({ [UNFOLLOW_LEASE_KEY]: next });
+      return { ok: true, token: next.token };
+    }
+    if (!owns) return { ok: false };
+    if (type === 'xnfb:releaseUnfollow') await localSet({ [UNFOLLOW_LEASE_KEY]: null });
+    else {
+      if (lease.expiresAt <= Date.now()) return { ok: false };
+      await localSet({ [UNFOLLOW_LEASE_KEY]: { ...lease, expiresAt: Date.now() + UNFOLLOW_LEASE_MS } });
+    }
+    return { ok: true };
+  });
+}
 const MEDIA_EXTENSION_CONTENT_TYPE = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -97,12 +151,56 @@ function isHashtagInsideUrl(text, index) {
   return /(?:https?:\/\/|www\.)\S*$/i.test(text.slice(0, index));
 }
 
+function findSquareHashtags(text) {
+  return Array.from(text.matchAll(/#[\p{L}\p{N}_]+/gu))
+    .filter((match) => {
+      const index = match.index ?? -1;
+      const previous = index > 0 ? text[index - 1] : '';
+      return index >= 0
+        && previous !== '#'
+        && !isHashtagInsideUrl(text, index);
+    });
+}
+
+function findEnglishSquareHashtags(text) {
+  return Array.from(text.matchAll(/#[A-Za-z0-9_]+(?![\p{L}\p{N}_])/gu))
+    .filter((match) => {
+      const index = match.index ?? -1;
+      const previous = index > 0 ? text[index - 1] : '';
+      return index >= 0
+        && previous !== '#'
+        && !isHashtagInsideUrl(text, index);
+    });
+}
+
+function removeLastEnglishSquareHashtag(text) {
+  const match = findEnglishSquareHashtags(text).at(-1);
+  if (!match) return null;
+
+  let start = match.index;
+  let end = start + match[0].length;
+  while (start > 0 && /[\t ]/.test(text[start - 1])) start -= 1;
+  if (start === match.index) {
+    while (end < text.length && /[\t ]/.test(text[end])) end += 1;
+  }
+
+  return {
+    text: text.slice(0, start) + text.slice(end),
+    hashtag: match[0],
+  };
+}
+
+function isHashtagLimitError(message) {
+  return /hashtag|hash[\s_-]?tag|话题标签/i.test(message)
+    && /count|quantity|number|limit|maximum|\bmax\b|exceed|too many|more than|at most|only|over|数量|超过|最多|上限|太多|不能超过/i.test(message);
+}
+
 async function prepareSquareText(text) {
-  const explicitSymbols = Array.from(text.matchAll(/(?:^|[^A-Za-z0-9_])\$([A-Za-z0-9]{1,20})(?![A-Za-z0-9_])/g))
+  const explicitSymbols = Array.from(text.matchAll(/(?:^|[^A-Za-z0-9_])\$([A-Za-z0-9]{1,20})(?![\p{L}\p{N}_])/gu))
     .filter((match) => !isHashtagInsideUrl(text, match.index + match[0].indexOf('$')))
     .map((match) => match[1].toUpperCase())
     .filter((symbol, index, symbols) => symbols.indexOf(symbol) === index);
-  const hasCandidateHashtag = Array.from(text.matchAll(/#([A-Za-z0-9]{1,20})(?![A-Za-z0-9_])/g))
+  const hasCandidateHashtag = Array.from(text.matchAll(/#([A-Za-z0-9]{1,20})(?![\p{L}\p{N}_])/gu))
     .some((match) => match.index === 0 || (text[match.index - 1] !== '#' && !isHashtagInsideUrl(text, match.index)));
   if (!hasCandidateHashtag && !explicitSymbols.length) return { text, symbols: [], skippedSymbols: [] };
 
@@ -112,7 +210,7 @@ async function prepareSquareText(text) {
     throw new Error(`币安每帖最多 ${MAX_SQUARE_CASHTAGS} 个币种标记；原文已有 ${symbols.size} 个有效币种，请保留最相关的 ${MAX_SQUARE_CASHTAGS} 个后再同步`);
   }
   const skippedSymbols = new Set();
-  const convertedText = text.replace(/#([A-Za-z0-9]{1,20})(?![A-Za-z0-9_])/g, (tag, rawSymbol, index) => {
+  const convertedText = text.replace(/#([A-Za-z0-9]{1,20})(?![\p{L}\p{N}_])/gu, (tag, rawSymbol, index) => {
     if ((index > 0 && text[index - 1] === '#') || isHashtagInsideUrl(text, index)) return tag;
     const symbol = rawSymbol.toUpperCase();
     if (!spotAssets.has(symbol)) return tag;
@@ -137,19 +235,14 @@ function getPublishedSourcePost(sourceId) {
 }
 
 function rememberPublishedSourcePost(sourceId, post) {
-  if (!/^\d{5,30}$/.test(String(sourceId || ''))) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    chrome.storage.local.get([PUBLISHED_SOURCE_POSTS_KEY], (data) => {
-      if (chrome.runtime.lastError) return resolve(false);
-      const entries = { ...(data?.[PUBLISHED_SOURCE_POSTS_KEY] || {}) };
-      entries[sourceId] = { ...post, publishedAt: Date.now() };
-      const retained = Object.entries(entries)
-        .sort((a, b) => Number(b[1]?.publishedAt || 0) - Number(a[1]?.publishedAt || 0))
-        .slice(0, 500);
-      chrome.storage.local.set({
-        [PUBLISHED_SOURCE_POSTS_KEY]: Object.fromEntries(retained),
-      }, () => resolve(!chrome.runtime.lastError));
-    });
+  return serializedStorage(async () => {
+    const data = await localGet([PUBLISHED_SOURCE_POSTS_KEY, PENDING_SOURCE_POSTS_KEY]);
+    const entries = { ...(data[PUBLISHED_SOURCE_POSTS_KEY] || {}), [sourceId]: { ...post, publishedAt: Date.now() } };
+    const retained = Object.entries(entries).sort((a, b) => Number(b[1]?.publishedAt || 0) - Number(a[1]?.publishedAt || 0)).slice(0, 500);
+    const pending = { ...(data[PENDING_SOURCE_POSTS_KEY] || {}) };
+    delete pending[sourceId];
+    await localSet({ [PUBLISHED_SOURCE_POSTS_KEY]: Object.fromEntries(retained), [PENDING_SOURCE_POSTS_KEY]: pending });
+    return true;
   });
 }
 
@@ -301,11 +394,30 @@ async function uploadOneVideo(video, apiKey) {
   };
 }
 
-async function syncToSquare({ text, images, video, sourceId, allowNonMonetized = false, allowCashtagLimit = false }) {
+async function syncToSquare(payload) {
+  const sourceId = String(payload?.sourceId || '');
+  if (!/^\d{5,30}$/.test(sourceId)) return { ok: false, error: '无法识别 X 原帖 ID，未发布；请刷新推文后重试' };
+  if (inFlightSyncs.has(sourceId)) return inFlightSyncs.get(sourceId);
+  const task = performSyncToSquare({ ...payload, sourceId });
+  inFlightSyncs.set(sourceId, task);
+  try { return await task; }
+  catch (error) { return { ok: false, error: error?.message || '同步失败' }; }
+  finally { inFlightSyncs.delete(sourceId); }
+}
+async function performSyncToSquare({ text, images, video, sourceId, allowNonMonetized = false, allowCashtagLimit = false }) {
   const priorPost = await getPublishedSourcePost(sourceId);
   if (priorPost) {
-    return { ok: true, alreadyPublished: true, postId: priorPost.postId || '', postUrl: priorPost.postUrl || '', symbols: priorPost.symbols || [] };
+    return {
+      ok: true,
+      alreadyPublished: true,
+      postId: priorPost.postId || '',
+      postUrl: priorPost.postUrl || '',
+      symbols: priorPost.symbols || [],
+      trimmedHashtags: priorPost.trimmedHashtags || [],
+    };
   }
+  const pending = await localGet([PENDING_SOURCE_POSTS_KEY]);
+  if (pending[PENDING_SOURCE_POSTS_KEY]?.[sourceId]) return { ok: false, uncertain: true, error: '这条推文的发布结果待核实。请先检查 Square，再到插件「同步记录」处理，避免重复发布。' };
   const apiKey = await getApiKey();
   if (!apiKey) return { ok: false, error: '请先在插件面板中填写并保存 Binance OpenAPI Key' };
   const sourceText = typeof text === 'string' ? text : '';
@@ -363,40 +475,86 @@ async function syncToSquare({ text, images, video, sourceId, allowNonMonetized =
       if (imageList && imageList.length) body.imageList = imageList;
     }
 
-    let r;
-    try {
-      r = await binancePost(`${V1_BASE}/content/add`, body, apiKey);
-    } catch (err) {
-      return {
-        ok: false,
-        uncertain: true,
-        error: `Square 发布请求没有得到确认（${err?.message || '网络错误'}）。帖子可能已发布，请先检查 Square，再决定是否重试。`,
-      };
+    // Persist before the irreversible network request, including across worker restarts.
+    await updatePendingPost(sourceId, { startedAt: Date.now() });
+    let requestBody = body;
+    const trimmedHashtags = [];
+    while (true) {
+      let r;
+      try {
+        r = await binancePost(`${V1_BASE}/content/add`, requestBody, apiKey);
+      } catch (err) {
+        return {
+          ok: false,
+          uncertain: true,
+          error: `Square 发布请求没有得到确认（${err?.message || '网络错误'}）。帖子可能已发布，请先检查 Square，再决定是否重试。`,
+        };
+      }
+      if (r.json?.code === '000000') {
+        const postId = r.json?.data?.id == null ? '' : String(r.json.data.id);
+        const postUrl = /^\d+$/.test(postId)
+          ? `https://www.binance.com/en/square/post/${postId}`
+          : '';
+        try { await rememberPublishedSourcePost(sourceId, { postId, postUrl, symbols: tokenSymbols, trimmedHashtags }); }
+        catch { return { ok: true, postId, postUrl, symbols: tokenSymbols, skippedSymbols, trimmedHashtags, recordWarning: '发布成功，但本地历史保存失败；已保留待核实保护，请勿重发' }; }
+        return { ok: true, symbols: tokenSymbols, skippedSymbols, trimmedHashtags, postId, postUrl };
+      }
+      if (r.status >= 500) {
+        return { ok: false, uncertain: true, error: '币安没有及时返回结果，帖子可能已发布。请先检查 Square 最新内容，再决定是否重试。' };
+      }
+
+      const apiMessage = r.json?.message || `发布失败（code=${r.json?.code ?? r.status}）`;
+      if (isHashtagLimitError(apiMessage)) {
+        const trimmed = removeLastEnglishSquareHashtag(requestBody.bodyTextOnly || '');
+        if (trimmed) {
+          // Retry only after Binance explicitly rejects hashtag quantity. Preserve Chinese
+          // topic tags and never retry ambiguous/5xx results.
+          requestBody = { ...requestBody, bodyTextOnly: trimmed.text };
+          trimmedHashtags.push(trimmed.hashtag);
+          continue;
+        }
+        const count = findSquareHashtags(requestBody.bodyTextOnly || '').length;
+        const removedNote = trimmedHashtags.length
+          ? ` 已尝试省略英文标签 ${trimmedHashtags.join(' ')}，中文标签未改动，但仍被拒绝。`
+          : ' 中文话题标签未改动。';
+        await updatePendingPost(sourceId, null);
+        return {
+          ok: false,
+          error: `币安拒绝了话题标签数量（当前正文还有 ${count} 个 #标签）。${removedNote}接口返回：${apiMessage}`,
+        };
+      }
+      await updatePendingPost(sourceId, null);
+      return { ok: false, error: apiMessage };
     }
-    if (r.json?.code === '000000') {
-      const postId = r.json?.data?.id == null ? '' : String(r.json.data.id);
-      const postUrl = /^\d+$/.test(postId)
-        ? `https://www.binance.com/en/square/post/${postId}`
-        : '';
-      await rememberPublishedSourcePost(sourceId, { postId, postUrl, symbols: tokenSymbols });
-      return { ok: true, symbols: tokenSymbols, skippedSymbols, postId, postUrl };
-    }
-    if (r.status >= 500) {
-      return { ok: false, uncertain: true, error: '币安没有及时返回结果，帖子可能已发布。请先检查 Square 最新内容，再决定是否重试。' };
-    }
-    return { ok: false, error: r.json?.message || `发布失败（code=${r.json?.code ?? r.status}）` };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
+  serializedStorage(async () => {
+    const data = await localGet([UNFOLLOW_LEASE_KEY]);
+    if (data[UNFOLLOW_LEASE_KEY]?.tabId === tabId) await localSet({ [UNFOLLOW_LEASE_KEY]: null });
+  }).catch(() => {});
+});
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (['xnfb:acquireUnfollow', 'xnfb:renewUnfollow', 'xnfb:releaseUnfollow'].includes(msg?.type)) {
+    manageUnfollowLease(msg.type, sender, msg.token).then(sendResponse).catch(() => sendResponse({ ok: false, error: '任务锁读取失败，未执行取关' }));
+    return true;
+  }
+  if (msg?.type === 'xnfb:clearPendingPost') {
+    if (sender.tab || sender.url !== chrome.runtime.getURL('popup/popup.html')) { sendResponse({ ok: false }); return false; }
+    if (!/^\d{5,30}$/.test(String(msg.sourceId || ''))) { sendResponse({ ok: false }); return false; }
+    if (inFlightSyncs.has(msg.sourceId)) { sendResponse({ ok: false, error: '正在发布中，请稍后核实' }); return false; }
+    updatePendingPost(msg.sourceId, null).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false, error: '本地记录更新失败' }));
+    return true;
+  }
   if (msg?.type === 'xnfb:syncToSquare') {
     syncToSquare({
       ...(msg.payload || {}),
       allowNonMonetized: !!msg.allowNonMonetized,
       allowCashtagLimit: !!msg.allowCashtagLimit,
-    }).then(sendResponse);
+    }).then(sendResponse).catch(() => sendResponse({ ok: false, error: '同步失败，请稍后重试' }));
     return true;
   }
   if (msg?.type === 'xnfb:openSquarePost') {

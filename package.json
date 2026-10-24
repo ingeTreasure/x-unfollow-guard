@@ -1,0 +1,15 @@
+{
+  "name": "x-unfollow-guard",
+  "version": "2.0.1",
+  "private": true,
+  "description": "Local-first Chrome extension for X following management and Binance Square sync",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/background.test.cjs tests/content.test.cjs tests/pacing.test.cjs",
+    "check": "node --check background/background.js && node --check content/pacing.js && node --check content/content.js && node --check popup/popup.js",
+    "build:icons": "node scripts/build-icons.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
