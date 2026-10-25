@@ -14,6 +14,12 @@
 
 图标源文件为 `icons/logo.svg`。需要重新导出 PNG 时，先安装开发工具 `npm install --no-save sharp`，再运行 `node scripts/build-icons.cjs`。
 
+## 原生弹窗排版回归
+
+可选浏览器检查使用 Playwright 1.62.1：先运行 `npm install --ignore-scripts` 和 `npx playwright install chromium`，再运行 `npm run test:popup`。核心 `npm test` 与 `npm run check` 仍无需安装依赖。
+
+该检查在隔离临时浏览器配置中打开真正的工具栏弹窗，检查尺寸、内容滚动、固定页签/底栏、历史分页与确认框；较小视口在扩展标签页中补测。它不读取用户 Chrome 配置，不访问真实 X 账号或向 Binance 发帖。默认使用带界面的 Chromium；支持新无头模式的环境可设置 `EXTENSION_HEADLESS=1`。
+
 ## 验证边界
 
 单元测试不等同于真实 X 页面或 Binance 实发验收。请明确说明实际完成的验证，不要在他人账号上执行自动取关或发布内容，不要把随机等待描述成能保证避免平台限制。

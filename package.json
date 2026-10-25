@@ -1,15 +1,20 @@
 {
-  "name": "x-unfollow-guard",
-  "version": "2.0.1",
+  "name": "fan-manager",
+  "version": "2.0.2",
   "private": true,
-  "description": "Local-first Chrome extension for X following management and Binance Square sync",
+  "description": "粉丝管理：X 关注管理、保护名单与币安广场同步",
   "license": "MIT",
   "scripts": {
     "test": "node --test tests/background.test.cjs tests/content.test.cjs tests/pacing.test.cjs",
     "check": "node --check background/background.js && node --check content/pacing.js && node --check content/content.js && node --check popup/popup.js",
-    "build:icons": "node scripts/build-icons.cjs"
+    "build:icons": "node scripts/build-icons.cjs",
+    "test:popup": "node --test tests/popup-layout.browser.cjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "displayName": "粉丝管理",
+  "devDependencies": {
+    "playwright": "1.62.1"
   }
 }

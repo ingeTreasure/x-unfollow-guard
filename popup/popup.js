@@ -58,6 +58,7 @@
       tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
       $(`panel-${tab.dataset.tab}`).classList.toggle('hidden', !selected);
     });
+    document.querySelector('main').scrollTop = 0;
     if (name === 'history') loadHistory().catch(() => status('statusLine', '同步记录读取失败', true));
   }
   document.querySelectorAll('[role=tab]').forEach((tab, index, tabs) => {

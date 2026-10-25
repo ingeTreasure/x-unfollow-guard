@@ -15,7 +15,7 @@ for script in manifest['content_scripts']:
 assert all((ROOT / path).is_file() for path in required)
 output = ROOT / 'releases'
 output.mkdir(exist_ok=True)
-archive = output / f'x-unfollow-guard-v{manifest["version"]}.zip'
+archive = output / f'fan-manager-v{manifest["version"]}.zip'
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as package:
     for file in files:
         package.write(file, file.relative_to(ROOT))

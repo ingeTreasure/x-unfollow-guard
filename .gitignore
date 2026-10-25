@@ -12,3 +12,6 @@ __pycache__/
 /releases/*
 !/releases/x-unfollow-guard-v2.0.1.zip
 !/releases/x-unfollow-guard-v2.0.1.zip.sha256
+
+!/releases/fan-manager-v2.0.2.zip
+!/releases/fan-manager-v2.0.2.zip.sha256

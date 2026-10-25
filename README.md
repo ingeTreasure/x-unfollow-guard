@@ -1,18 +1,30 @@
-<p align="center"><img src="icons/logo.png" width="88" height="88" alt="X 未回关卫士 Logo" /></p>
+<p align="center"><img src="icons/logo.png" width="88" height="88" alt="粉丝管理 Logo" /></p>
 
-# X 未回关卫士 2.0.1
+# 粉丝管理 2.0.2
 
 在自己的 X 关注列表中识别未回关账号，保护重要关注，并按需同步推文到 Binance Square。
 
 A local-first Chrome extension for X following management, protected accounts, and Binance Square synchronization.
 
-[下载安装包](https://github.com/ingeTreasure/x-unfollow-guard/raw/refs/heads/main/releases/x-unfollow-guard-v2.0.1.zip) · [更新记录](CHANGELOG.md) · [参与开发](CONTRIBUTING.md) · [MIT 许可证](LICENSE)
+[GitHub 下载安装包](https://github.com/ingeTreasure/x-unfollow-guard/raw/refs/tags/v2.0.2/releases/fan-manager-v2.0.2.zip) · [官网下载与安装指南](https://aidukey.uk/tools/x-unfollow-guard) · [更新记录](CHANGELOG.md) · [参与开发](CONTRIBUTING.md) · [MIT 许可证](LICENSE)
 
-<p align="center"><img src="docs/design/popup-render.png" width="360" alt="关注管理面板，示例账号和隔离测试数据" /></p>
+<p align="center"><img src="docs/design/popup-v2.0.2-c0b790a13ad3.png" width="360" alt="粉丝管理 2.0.2 的真实 Chrome 弹窗，未连接 X 的默认状态" /></p>
 
-*截图使用示例账号和隔离测试数据。支持 Chrome 开发者模式加载，尚未上架 Chrome 应用商店。*
+*上图是隔离浏览器中的真实弹窗，未连接 X 账号。支持 Chrome 开发者模式加载，尚未上架 Chrome 应用商店。*
+
+### 未回关账号怎么显示
+
+<p><img src="docs/design/non-followers-example-v2.0.2-4b5793a43860.png" width="640" alt="未回关示例：淡红背景和未回关标记；有关注你标识的账号保持正常显示" /></p>
+
+*演示账号与示例数据，使用当前插件的实际高亮代码生成；未操作真实账号。X 实际页面布局可能变化。*
 
 
+
+## 2.0.2 修复
+
+- 名称统一为「粉丝管理」。
+- 明确设置 Chrome 弹窗尺寸，修复右侧大块空白和超高排版；中间内容独立滚动，页签与底栏始终可见。
+- 沿用原有存储键与权限。在原加载目录替换文件并重新加载，可继续使用现有配置。
 
 ## 2.0 升级内容
 
@@ -48,7 +60,7 @@ Chrome 浏览器插件，提供三项功能：
 1. 下载上方安装包并解压，或克隆本仓库；
 2. 打开 Chrome，地址栏输入 `chrome://extensions`；
 3. 右上角打开「开发者模式」；
-4. 点击「加载已解压的扩展程序」，选择本项目文件夹 `x-unfollow-guard`；
+4. 点击「加载已解压的扩展程序」，选择直接包含 `manifest.json` 的文件夹（克隆仓库时为 `x-unfollow-guard`）；
 5. 浏览器工具栏出现插件图标即安装成功。
 
 ## 使用步骤

@@ -248,7 +248,7 @@
     return new Promise((resolve) => {
       chrome.storage.local.get(keys, (data) => {
         if (chrome.runtime.lastError) {
-          console.warn('[未回关卫士] 读取本地存储失败：', chrome.runtime.lastError.message);
+          console.warn('[粉丝管理] 读取本地存储失败：', chrome.runtime.lastError.message);
           resolve({});
           return;
         }
@@ -260,7 +260,7 @@
     return new Promise((resolve) => {
       chrome.storage.local.set(obj, () => {
         if (chrome.runtime.lastError) {
-          console.warn('[未回关卫士] 写入本地存储失败：', chrome.runtime.lastError.message);
+          console.warn('[粉丝管理] 写入本地存储失败：', chrome.runtime.lastError.message);
           resolve(false);
           return;
         }
@@ -467,7 +467,7 @@
       unfollowTimer = null;
       unfollowBusy = true;
       unfollowTick().catch(async (error) => {
-        console.error('[未回关卫士] 自动取关异常并停止：', error);
+        console.error('[粉丝管理] 自动取关异常并停止：', error);
         await stopAutoUnfollow();
         notifyStatus(`自动取关遇到错误并已停止：${error?.message || '未知错误'}`);
       }).finally(async () => {
@@ -991,7 +991,7 @@
           sendResponse({ ok: false, error: 'unknown message' });
       }
     })().catch((error) => {
-      console.error('[未回关卫士] 处理页面操作失败：', error);
+      console.error('[粉丝管理] 处理页面操作失败：', error);
       sendResponse({
         ok: false,
         error: 'internal_error',
